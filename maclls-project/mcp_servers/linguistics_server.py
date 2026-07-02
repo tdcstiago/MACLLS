@@ -1,3 +1,5 @@
+import functools
+
 from mcp.server.fastmcp import FastMCP
 
 # spaCy is optional: the module must import (and all word-mode behaviour must work)
@@ -22,9 +24,6 @@ SPACY_MODELS = {
     "Italian": "it_core_news_sm",
     "Romanian": "ro_core_news_sm",
 }
-
-# Lazy singleton cache of loaded spaCy pipelines, keyed by model name.
-_NLP_CACHE = {}
 
 # --- Curated high-risk false friends -----------------------------------------
 # Maps an L1 word (lowercased) -> target language -> the twin scenario pair:
@@ -137,8 +136,12 @@ def discover_contrastive_scenarios(word_l1: str, l2_lang: str = "English") -> di
     return result
 
 
+@functools.lru_cache(maxsize=2)
 def _load_model(lang: str):
-    """Lazily load and cache the spaCy pipeline for a display-language.
+    """Lazily load the spaCy pipeline for a display-language.
+
+    Decorated with an LRU cache (maxsize=2) so at most two heavy spaCy models are
+    resident in RAM at once — this bounds memory and prevents OOM crashes.
 
     Returns (nlp, None) on success, or (None, warning) when spaCy or the model is
     unavailable — callers must degrade gracefully rather than fail."""
@@ -149,9 +152,6 @@ def _load_model(lang: str):
     if not model_name:
         return None, f"No spaCy model configured for '{lang}'; falling back to LLM-only analysis."
 
-    if model_name in _NLP_CACHE:
-        return _NLP_CACHE[model_name], None
-
     try:
         nlp = spacy.load(model_name)
     except Exception:  # model not downloaded / load failure
@@ -160,7 +160,6 @@ def _load_model(lang: str):
             f"(run: python -m spacy download {model_name}); falling back to LLM-only analysis."
         )
 
-    _NLP_CACHE[model_name] = nlp
     return nlp, None
 
 
