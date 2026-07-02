@@ -78,6 +78,24 @@ class TestDatabaseManager(unittest.TestCase):
     def test_cache_miss_returns_none(self):
         self.assertIsNone(self.db.get_cached("does-not-exist"))
 
+    def test_lesson_cache_has_token_count_column(self):
+        cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(lesson_cache)").fetchall()}
+        self.assertIn("token_count", cols)
+
+    def test_migrate_is_idempotent(self):
+        # Re-running the migration on a DB that already has the column is a no-op.
+        self.db._migrate()
+        cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(lesson_cache)").fetchall()}
+        self.assertIn("token_count", cols)
+
+    def test_cache_stores_and_returns_token_count(self):
+        self.db.store_cache("tok", "word", "B1", json.dumps({"lesson": "x"}), token_count=1234)
+        self.assertEqual(self.db.get_cached("tok")["token_count"], 1234)
+
+    def test_cache_token_count_defaults_to_zero(self):
+        self.db.store_cache("tok0", "word", "B1", json.dumps({"lesson": "x"}))
+        self.assertEqual(self.db.get_cached("tok0")["token_count"], 0)
+
     def test_cache_upsert_replaces_entry(self):
         self.db.store_cache("k", "word", "B1", json.dumps({"v": 1}))
         self.db.store_cache("k", "word", "B1", json.dumps({"v": 2}))
