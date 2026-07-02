@@ -76,6 +76,19 @@ a local SQLite database that also powers a built-in **spaced-repetition flashcar
 The L1 and L2 specialists execute **concurrently** (`ThreadPoolExecutor`, fail-fast); the
 Pedagogue runs once and returns a schema-validated payload.
 
+### 🔌 MCP server
+
+`mcp_servers/linguistics_server.py` is a fully standards-compliant **MCP server** built on
+`FastMCP`, exposing two tools (`discover_contrastive_scenarios`, `analyze_sentence_structure`).
+
+> **Note on execution:** the Streamlit app imports these tools **directly** (in-process) for
+> lowest latency. That is a deliberate performance choice — it is *not* a limitation of the MCP
+> layer. The same server can be run and consumed over **stdio** by any MCP client:
+>
+> ```bash
+> mcp run mcp_servers/linguistics_server.py
+> ```
+
 ---
 
 ## 📁 Project structure
@@ -149,6 +162,16 @@ python -m spacy download pt_core_news_sm en_core_web_sm
 ```
 
 For a cloud deployment, `setup.sh` installs the dependencies and all 7 models in one step.
+
+### ☁️ One-click cloud deployment
+
+The project ships with both a **`Dockerfile`** and a **`Procfile`** for true one-click deploys:
+
+- **`Dockerfile`** (`python:3.12-slim`) installs dependencies, runs `setup.sh` to bake in the
+  spaCy models at build time, exposes `8501`, and launches Streamlit — deployable to any
+  container host (AWS, Cloud Run, Fly.io, …).
+- **`Procfile`** (`web: streamlit run app.py --server.port $PORT --server.address 0.0.0.0`)
+  targets buildpack platforms like Render and Heroku.
 
 ### 3. Configure your Gemini API key
 
