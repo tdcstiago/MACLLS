@@ -58,6 +58,12 @@ class TestOrchestratorMock(unittest.TestCase):
         self.assertFalse(result["has_local_data"])
         self.assertIn("MOCK ANALYSIS", result["lesson"])
 
+    def test_mock_result_carries_token_and_parse_flags(self):
+        # New metadata: mock path has no LLM cost and never fails to parse.
+        result = self.orchestrator.process_lesson('pretender')
+        self.assertEqual(result["token_count"], 0)
+        self.assertTrue(result["parse_ok"])
+
 
 class TestProficiencyAndModeRouting(unittest.TestCase):
     def setUp(self):

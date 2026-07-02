@@ -157,6 +157,13 @@ with tab_analysis:
         result = analysis["result"]
         labels = result["labels"]
 
+        # The LLM's JSON payload failed to parse (fallback path) → warn the user.
+        if not result.get("parse_ok", True):
+            st.warning(
+                "⚠️ A IA gerou uma resposta incompleta ou mal formatada. "
+                "Por favor, tente analisar novamente."
+            )
+
         st.success("Analysis Complete!")
         st.info(f"🎯 Calibrado para {result['target_level']}")
 

@@ -125,6 +125,14 @@ class LanguageOrchestrator:
             raise RuntimeError(f"Empty response from {model} (finish_reason={reason})")
         return response.text
 
+    def _count_tokens(self, prompt: str, model: str = "gemini-2.5-flash") -> int:
+        """Best-effort prompt token count for cost tracking. Returns 0 on any error
+        so token accounting never breaks lesson generation."""
+        try:
+            return self.client.models.count_tokens(model=model, contents=prompt).total_tokens
+        except Exception:  # noqa: BLE001 - accounting must never block the pipeline
+            return 0
+
     def _generate_content_with_retry(
         self,
         prompt: str,
@@ -204,7 +212,7 @@ class LanguageOrchestrator:
                 "output. First 100 chars: %s", (text or "")[:100]
             )
             return {"lesson": text, "safe_target": "", "dangerous_target": "",
-                    "similar_options": [], "target_level": ""}
+                    "similar_options": [], "target_level": "", "parse_ok": False}
         options = [str(i).strip() for i in (data.get("similar_options") or []) if str(i).strip()]
         return {
             "lesson": data.get("lesson_markdown") or text,
@@ -212,6 +220,7 @@ class LanguageOrchestrator:
             "dangerous_target": str(data.get("dangerous_target") or "").strip(),
             "similar_options": options[:NUM_SIMILAR_OPTIONS],
             "target_level": str(data.get("target_level") or "").strip(),
+            "parse_ok": True,
         }
 
     @classmethod
@@ -225,7 +234,8 @@ class LanguageOrchestrator:
                 "output. First 100 chars: %s", (text or "")[:100]
             )
             return {"lesson": text, "l2_rendering": "", "structural_notes": [],
-                    "detected_false_friends": [], "similar_options": [], "target_level": ""}
+                    "detected_false_friends": [], "similar_options": [],
+                    "target_level": "", "parse_ok": False}
 
         def _clean_list(key):
             return [str(i).strip() for i in (data.get(key) or []) if str(i).strip()]
@@ -237,6 +247,7 @@ class LanguageOrchestrator:
             "detected_false_friends": _clean_list("detected_false_friends"),
             "similar_options": _clean_list("similar_options")[:NUM_SIMILAR_OPTIONS],
             "target_level": str(data.get("target_level") or "").strip(),
+            "parse_ok": True,
         }
 
     # --- result shaping ------------------------------------------------------
@@ -297,8 +308,12 @@ class LanguageOrchestrator:
                 return self._word_mock(text, scenarios, labels, level)
             result = self._run_word_pipeline(text, l1_lang, l2_lang, scenarios, labels, profile, level)
 
-        if cache_key is not None:
-            self.db.store_cache(cache_key, mode, level, json.dumps(result))
+        # Cache only well-formed responses (never persist a parse-failure fallback).
+        if cache_key is not None and result.get("parse_ok", True):
+            self.db.store_cache(
+                cache_key, mode, level, json.dumps(result),
+                token_count=result.get("token_count", 0),
+            )
         return result
 
     # --- word-mode pipeline --------------------------------------------------
@@ -406,6 +421,7 @@ Return a JSON object matching the required schema, where:
             config = types.GenerateContentConfig(
                 response_mime_type="application/json", response_schema=PedagogueOutput
             )
+            token_count = self._count_tokens(final_prompt)
             parsed = self._parse_pedagogue_payload(
                 self._generate_content_with_retry(final_prompt, config=config)
             )
@@ -421,7 +437,7 @@ Return a JSON object matching the required schema, where:
             return self._build_result(
                 "word", parsed["lesson"], labels, level, scenarios["warning"],
                 dangerous=dangerous, safe=safe, alternatives=parsed["similar_options"],
-                has_local_data=has_local,
+                has_local_data=has_local, token_count=token_count, parse_ok=parsed["parse_ok"],
             )
 
         except APIError as e:
@@ -506,6 +522,7 @@ Return a JSON object matching the required schema, where:
             config = types.GenerateContentConfig(
                 response_mime_type="application/json", response_schema=SentenceLessonOutput
             )
+            token_count = self._count_tokens(final_prompt)
             parsed = self._parse_sentence_payload(
                 self._generate_content_with_retry(final_prompt, config=config)
             )
@@ -518,6 +535,7 @@ Return a JSON object matching the required schema, where:
                 detected_false_friends=structure["detected_false_friends"],
                 alternatives=parsed["similar_options"],
                 has_local_data=structure["has_local_data"],
+                token_count=token_count, parse_ok=parsed["parse_ok"],
             )
 
         except APIError as e:
@@ -547,7 +565,7 @@ Return a JSON object matching the required schema, where:
         return self._build_result(
             "word", "\n".join(lines), labels, level, scenarios["warning"],
             dangerous=dangerous, safe=safe, alternatives=[],
-            has_local_data=scenarios["has_local_data"],
+            has_local_data=scenarios["has_local_data"], token_count=0, parse_ok=True,
         )
 
     def _sentence_mock(self, sentence: str, structure: dict, labels: dict, level: str) -> dict:
@@ -572,4 +590,5 @@ Return a JSON object matching the required schema, where:
             "sentence", "\n".join(lines), labels, level, structure["warning"],
             l2_rendering="", structural_notes=[], detected_false_friends=detected,
             alternatives=[], has_local_data=structure["has_local_data"],
+            token_count=0, parse_ok=True,
         )

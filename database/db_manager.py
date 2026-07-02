@@ -36,9 +36,13 @@ class DatabaseManager:
         # check_same_thread=False: Streamlit reruns may touch the connection from
         # different threads; a Lock guards all writes.
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        # Write-Ahead Logging: lets readers and a writer work concurrently, avoiding
+        # "database is locked" errors under concurrent web requests. (No-op on :memory:.)
+        self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._create_tables()
+        self._migrate()
         self._seed_languages()
 
     # --- schema + seeding ----------------------------------------------------
@@ -62,7 +66,8 @@ class DatabaseManager:
                     input_mode TEXT,
                     proficiency_level TEXT,
                     response_json TEXT,
-                    created_at DATETIME
+                    created_at DATETIME,
+                    token_count INTEGER DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS flashcards (
                     id INTEGER PRIMARY KEY,
@@ -77,6 +82,17 @@ class DatabaseManager:
                 """
             )
             self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive schema migrations for pre-existing databases (safe to re-run)."""
+        with self._lock:
+            try:
+                self.conn.execute(
+                    "ALTER TABLE lesson_cache ADD COLUMN token_count INTEGER DEFAULT 0;"
+                )
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists (fresh DB or already migrated)
 
     def _seed_languages(self) -> None:
         """Idempotently seed the core languages (existing rows are left untouched)."""
@@ -122,26 +138,29 @@ class DatabaseManager:
         input_mode: str,
         proficiency_level: str,
         response_json: str,
+        token_count: int = 0,
         created_at=None,
     ) -> None:
-        """Upsert a cache entry. `created_at` accepts a datetime or ISO string;
-        the optional parameter exists mainly so tests can inject old timestamps."""
+        """Upsert a cache entry (with prompt token count for cost tracking).
+        `created_at` accepts a datetime or ISO string; the optional parameter
+        exists mainly so tests can inject old timestamps."""
         ts = created_at if created_at is not None else datetime.now()
         if isinstance(ts, datetime):
             ts = ts.isoformat()
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO lesson_cache "
-                "(cache_key, input_mode, proficiency_level, response_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (cache_key, input_mode, proficiency_level, response_json, ts),
+                "(cache_key, input_mode, proficiency_level, response_json, created_at, token_count) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (cache_key, input_mode, proficiency_level, response_json, ts, token_count),
             )
             self.conn.commit()
 
     def get_cached(self, cache_key: str, ttl_days: int = 30):
-        """Return the parsed cached object, or None if missing or older than TTL."""
+        """Return the parsed cached object (with its `token_count` attached), or
+        None if missing or older than TTL."""
         row = self.conn.execute(
-            "SELECT response_json, created_at FROM lesson_cache WHERE cache_key = ?",
+            "SELECT response_json, created_at, token_count FROM lesson_cache WHERE cache_key = ?",
             (cache_key,),
         ).fetchone()
         if row is None:
@@ -153,9 +172,12 @@ class DatabaseManager:
         if datetime.now() - created > timedelta(days=ttl_days):
             return None
         try:
-            return json.loads(row["response_json"])
+            result = json.loads(row["response_json"])
         except (TypeError, ValueError):
             return None
+        if isinstance(result, dict):
+            result["token_count"] = row["token_count"]
+        return result
 
     def clear_cache(self) -> int:
         """Delete every cached lesson. Returns the number of rows removed."""
