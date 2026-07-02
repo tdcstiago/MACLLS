@@ -1,0 +1,7 @@
+# Never bake secrets, local data, or the host virtualenv into the image.
+.streamlit/secrets.toml
+*.db
+venv/
+.git/
+__pycache__/
+.pytest_cache/
