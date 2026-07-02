@@ -1,12 +1,15 @@
+import hashlib
 import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, FIRST_EXCEPTION, wait
+from pathlib import Path
 
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+from agents import prompts as _prompts_module
 from agents.prompts import (
     L1_SPECIALIST_PROMPT,
     L2_SPECIALIST_PROMPT,
@@ -38,8 +41,17 @@ MAX_SENTENCE_LEN = 500
 # Cached lesson responses are considered fresh for this many days.
 CACHE_TTL_DAYS = 30
 
-# Bump whenever the prompt assembly changes so stale cache entries are invalidated.
-PROMPT_VERSION = "2"
+# Derived from a hash of prompts.py so that ANY edit to the prompt text
+# automatically invalidates stale SQLite cache entries for new requests.
+def _compute_prompt_version() -> str:
+    try:
+        content = Path(_prompts_module.__file__).read_bytes()
+        return hashlib.sha256(content).hexdigest()[:12]
+    except OSError:
+        return "unknown"
+
+
+PROMPT_VERSION = _compute_prompt_version()
 
 # How many secondary "similar options" the Pedagogue should generate.
 NUM_SIMILAR_OPTIONS = 5
@@ -187,6 +199,10 @@ class LanguageOrchestrator:
         try:
             data = json.loads(cls._strip_fences(text))
         except (ValueError, TypeError):
+            logger.warning(
+                "Payload parsing failed. Possible prompt injection or malformed LLM "
+                "output. First 100 chars: %s", (text or "")[:100]
+            )
             return {"lesson": text, "safe_target": "", "dangerous_target": "",
                     "similar_options": [], "target_level": ""}
         options = [str(i).strip() for i in (data.get("similar_options") or []) if str(i).strip()]
@@ -204,6 +220,10 @@ class LanguageOrchestrator:
         try:
             data = json.loads(cls._strip_fences(text))
         except (ValueError, TypeError):
+            logger.warning(
+                "Payload parsing failed. Possible prompt injection or malformed LLM "
+                "output. First 100 chars: %s", (text or "")[:100]
+            )
             return {"lesson": text, "l2_rendering": "", "structural_notes": [],
                     "detected_false_friends": [], "similar_options": [], "target_level": ""}
 

@@ -274,12 +274,15 @@ with tab_practice:
                 grade_buttons = [("Again", 0), ("Hard", 1), ("Good", 2), ("Easy", 3)]
                 for col, (label, grade) in zip(st.columns(4), grade_buttons):
                     if col.button(label, key=f"srs_grade_{grade}", use_container_width=True):
-                        db.update_flashcard_progress(card["id"], grade)
-                        current = st.session_state.review_queue.pop(0)
-                        if grade == 0:  # Again → requeue so it reappears this session
-                            st.session_state.review_queue.append(current)
-                        else:
-                            st.session_state.reviewed += 1
+                        # Defensive: a rapid double-click could fire this handler after
+                        # the queue was already drained — verify before popping.
+                        if st.session_state.review_queue:
+                            db.update_flashcard_progress(card["id"], grade)
+                            current = st.session_state.review_queue.pop(0)
+                            if grade == 0:  # Again → requeue so it reappears this session
+                                st.session_state.review_queue.append(current)
+                            else:
+                                st.session_state.reviewed += 1
                         st.session_state.srs_show_answer = False
                         st.rerun()
 
