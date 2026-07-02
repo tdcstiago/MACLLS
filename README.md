@@ -184,6 +184,9 @@ docker-compose up -d --build              # builds the image and starts the app 
 ./deploy.sh
 ```
 
+> **Note:** The `deploy.sh` script is designed for production Linux environments utilizing Nginx
+> and systemd. It is not intended for serverless platforms like Render or Heroku.
+
 **Method B — Nginx reverse proxy** (put the container behind a domain / TLS). Point Nginx at the
 container's exposed port:
 
