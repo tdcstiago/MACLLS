@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/Scripts/python.exe -W all -c ' *)",
+      "Bash(./venv/Scripts/python.exe -c \"import agents.orchestrator\")",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(./venv/Scripts/python.exe -m py_compile app.py agents/orchestrator.py agents/prompts.py mcp_servers/linguistics_server.py)",
+      "Bash(./venv/Scripts/python.exe -m unittest discover -s tests -v)",
+      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python.exe -c ' *)",
+      "Bash(./venv/Scripts/python.exe -m pip install -U \"google-genai~=1.0\")",
+      "Bash(./venv/Scripts/python.exe -c \"import agents.orchestrator; print\\('imported cleanly'\\)\")",
+      "Bash(./venv/Scripts/python.exe -m py_compile app.py agents/orchestrator.py database/db_manager.py)",
+      "Bash(ls *.db)",
+      "Bash(./venv/Scripts/python.exe -m py_compile app.py database/db_manager.py)",
+      "Bash(./venv/Scripts/python.exe -m py_compile app.py agents/orchestrator.py agents/prompts.py database/db_manager.py)",
+      "Bash(rtk git *)",
+      "Bash(git check-ignore *)",
+      "Bash(grep -E \"secrets|\\\\.db$\")"
+    ]
+  }
+}
