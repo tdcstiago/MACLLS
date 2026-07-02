@@ -10,7 +10,9 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+
+from database.srs_engine import review as srs_review, DEFAULT_EASE_FACTOR
 
 DEFAULT_DB_PATH = "maclls_local.db"
 
@@ -61,6 +63,16 @@ class DatabaseManager:
                     proficiency_level TEXT,
                     response_json TEXT,
                     created_at DATETIME
+                );
+                CREATE TABLE IF NOT EXISTS flashcards (
+                    id INTEGER PRIMARY KEY,
+                    cache_key TEXT,
+                    front_text TEXT,
+                    back_text TEXT,
+                    next_review DATE,
+                    interval INTEGER,
+                    ease_factor REAL,
+                    repetitions INTEGER
                 );
                 """
             )
@@ -151,6 +163,59 @@ class DatabaseManager:
             cur = self.conn.execute("DELETE FROM lesson_cache")
             self.conn.commit()
             return cur.rowcount
+
+    # --- flashcards (spaced repetition) --------------------------------------
+
+    @staticmethod
+    def _as_iso(day) -> str:
+        return day.isoformat() if isinstance(day, date) else str(day)
+
+    def add_flashcard(self, cache_key: str, front: str, back: str, next_review=None) -> int:
+        """Create a new flashcard due immediately (unless next_review is given).
+        Returns the new card id."""
+        nr = self._as_iso(next_review if next_review is not None else date.today())
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT INTO flashcards "
+                "(cache_key, front_text, back_text, next_review, interval, ease_factor, repetitions) "
+                "VALUES (?, ?, ?, ?, 0, ?, 0)",
+                (cache_key, front, back, nr, DEFAULT_EASE_FACTOR),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def get_due_flashcards(self, today=None) -> list:
+        """Return cards whose next_review is on or before `today` (default: today)."""
+        cutoff = self._as_iso(today if today is not None else date.today())
+        rows = self.conn.execute(
+            "SELECT * FROM flashcards WHERE next_review <= ? ORDER BY next_review, id",
+            (cutoff,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_flashcard_progress(self, card_id: int, grade: int, today=None):
+        """Apply an SM-2 review to a card and persist the new schedule.
+
+        Returns the resulting SrsState, or None if the card does not exist."""
+        row = self.conn.execute(
+            "SELECT interval, ease_factor, repetitions FROM flashcards WHERE id = ?",
+            (card_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        state = srs_review(
+            grade, row["repetitions"], row["ease_factor"], row["interval"], today=today
+        )
+        with self._lock:
+            self.conn.execute(
+                "UPDATE flashcards SET interval = ?, ease_factor = ?, repetitions = ?, "
+                "next_review = ? WHERE id = ?",
+                (state.interval, state.ease_factor, state.repetitions,
+                 state.next_review.isoformat(), card_id),
+            )
+            self.conn.commit()
+        return state
 
     # --- helpers -------------------------------------------------------------
 
