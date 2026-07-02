@@ -1,0 +1,29 @@
+# --- Secrets & credentials ---
+.streamlit/secrets.toml
+*.env
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Local database ---
+maclls_local.db
+*.db
+
+# --- OS / IDE ---
+.DS_Store
+.idea/
+.vscode/
+
