@@ -191,6 +191,22 @@ Click **▶️ Start Review Session** to pull all due cards (shuffled). A progre
 SM-2 engine reschedules the card, "Again" re-queues it for later in the session, and an empty
 queue shows **🎉 All caught up for today!**
 
+### Terminal CLI
+
+The same multi-agent pipeline is also exposed as an **Agents CLI** for headless / scripted use.
+It reads `GEMINI_API_KEY` from the environment or `.streamlit/secrets.toml`, reuses the SQLite
+cache, and falls back to mock mode with no key.
+
+```bash
+python cli.py "pretender"                          # word (defaults: PT→EN, B1)
+python cli.py "Eu pretendo viajar" --cefr C1       # sentence, advanced level
+python cli.py "casa" --l1 Portuguese --l2 English  # explicit languages
+```
+
+Flags: positional `text`, `--l1` (default Portuguese), `--l2` (default English), `--cefr`
+(default B1). It prints the CEFR level, the Safe/Dangerous targets (word mode), and the full
+lesson markdown.
+
 ---
 
 ## 💾 Data & persistence (`maclls_local.db`)
