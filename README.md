@@ -81,7 +81,7 @@ Pedagogue runs once and returns a schema-validated payload.
 ## 📁 Project structure
 
 ```
-maclls-project/
+MACLLS/                           # repository root
 ├── app.py                        # Streamlit UI: sidebar, Analysis tab, Daily Practice tab
 ├── agents/
 │   ├── orchestrator.py           # LanguageOrchestrator: pipeline, retries, cache, schemas
@@ -93,7 +93,7 @@ maclls-project/
 │   └── srs_engine.py             # Pure SM-2 spaced-repetition math
 ├── scripts/
 │   └── smoke_test.py             # Quick "is the Gemini key working?" check (reads env var)
-├── tests/                        # 60 tests (unittest)
+├── tests/                        # 65 tests (unittest)
 │   ├── test_agents_prompts.py
 │   ├── test_orchestrator.py
 │   ├── test_orchestrator_api.py  # retry/fallback/parallel/schema with a fake client
@@ -103,8 +103,10 @@ maclls-project/
 ├── .streamlit/
 │   ├── secrets.toml              # LOCAL ONLY, git-ignored — your real GEMINI_API_KEY
 │   └── secrets.toml.example      # template
+├── setup.sh                      # cloud post-build: pip install + spaCy models
 ├── requirements.txt
 ├── pyproject.toml                # pytest config (testpaths = ["tests"])
+├── README.md
 └── maclls_local.db               # created at runtime, git-ignored
 ```
 
@@ -124,14 +126,16 @@ maclls-project/
 
 ## 🚀 Setup
 
-> Commands below use the Windows layout (`venv\Scripts\`). On macOS/Linux use `venv/bin/`.
+> Commands below are cross-platform. Activate the virtual environment once, then run
+> everything through it. **Windows** users activate with `venv\Scripts\activate` instead of
+> `source venv/bin/activate`.
 
 ### 1. Create a virtual environment & install dependencies
 
-```powershell
-cd maclls-project
+```bash
 python -m venv venv
-venv\Scripts\python -m pip install -r requirements.txt
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
 ### 2. (Optional) Install spaCy models for sentence parsing
@@ -139,18 +143,20 @@ venv\Scripts\python -m pip install -r requirements.txt
 Language models are **not** pip dependencies. Sentence analysis works without them (LLM-only
 fallback), but for real POS/dependency parsing install the ones you need:
 
-```powershell
-venv\Scripts\python -m spacy download pt_core_news_sm en_core_web_sm
+```bash
+python -m spacy download pt_core_news_sm en_core_web_sm
 # es_core_news_sm · fr_core_news_sm · de_core_news_sm · it_core_news_sm · ro_core_news_sm
 ```
+
+For a cloud deployment, `setup.sh` installs the dependencies and all 7 models in one step.
 
 ### 3. Configure your Gemini API key
 
 Copy the template and paste your key (get one from Google AI Studio):
 
-```powershell
-copy .streamlit\secrets.toml.example .streamlit\secrets.toml
-# then edit .streamlit\secrets.toml → GEMINI_API_KEY = "your-key"
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # Windows: use `copy` and backslashes
+# then edit .streamlit/secrets.toml → GEMINI_API_KEY = "your-key"
 ```
 
 `secrets.toml` and `*.db` are git-ignored — **never commit real keys**. You can also paste the
@@ -161,11 +167,11 @@ key directly into the sidebar at runtime. Without any key the app still runs in 
 
 ## ▶️ Running the app
 
-```powershell
-venv\Scripts\streamlit run app.py --server.port 8506
+```bash
+streamlit run app.py
 ```
 
-Open the URL Streamlit prints (default `http://localhost:8506`).
+Open the URL Streamlit prints (default `http://localhost:8501`).
 
 ### Sidebar
 - **Native (L1)** and **Target (L2)** languages — populated from the DB language registry.
@@ -210,15 +216,15 @@ the ease factor floors at 1.3; a lapse (Again) resets repetitions and interval.
 
 ## 🧪 Testing
 
-```powershell
-venv\Scripts\python -m unittest discover -s tests
+```bash
+python -m unittest discover -s tests
 ```
 
-60 tests cover: prompt integrity, the orchestrator's retry/fallback/parallel/empty-response
+65 tests cover: prompt integrity, the orchestrator's retry/fallback/parallel/empty-response
 logic (via an injected fake Gemini client — no network needed), input classification, the MCP
-false-friend scan and graceful spaCy fallback, the SQLite layer (settings/cache/TTL/languages),
-and the SM-2 math + flashcard scheduling. Tests use in-memory SQLite and never require an API
-key or spaCy models.
+false-friend scan and graceful spaCy fallback, the SQLite layer (settings/cache/TTL/languages/
+token accounting), and the SM-2 math + flashcard scheduling. Tests use in-memory SQLite and
+never require an API key or spaCy models.
 
 ---
 
@@ -231,8 +237,23 @@ key or spaCy models.
 - **Retries** — transient HTTP errors (429/500/502/503/504) get exponential backoff, then a
   fallback to `gemini-2.5-pro`; empty/blocked responses raise a clear error instead of failing
   silently.
-- **Thread safety** — the SQLite connection uses `check_same_thread=False` with a write lock for
-  Streamlit's multi-threaded reruns.
+- **Thread safety & concurrency** — the SQLite connection uses `check_same_thread=False` with a
+  write lock, and runs in **WAL** (Write-Ahead Logging) mode to avoid "database is locked"
+  errors under concurrent web requests.
+
+---
+
+## 💰 Cost & observability
+
+- **Token usage tracking** — before each generation the `LanguageOrchestrator` counts the prompt
+  tokens (`count_tokens`) and persists them as `token_count` on the `lesson_cache` row, so LLM
+  spend is observable directly from SQLite. It's best-effort — token accounting never blocks a
+  lesson.
+- **Graceful parse auditing** — every LLM payload carries a `parse_ok` flag. When the JSON can't
+  be parsed (malformed output or a prompt-injection escape attempt), the app shows a friendly
+  "try again" warning instead of crashing, the orchestrator refuses to cache the bad response,
+  and the first 100 characters of the offending payload are logged via `logger.warning` for
+  security auditing.
 
 ---
 
