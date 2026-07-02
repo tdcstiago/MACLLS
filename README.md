@@ -163,15 +163,57 @@ python -m spacy download pt_core_news_sm en_core_web_sm
 
 For a cloud deployment, `setup.sh` installs the dependencies and all 7 models in one step.
 
-### ☁️ One-click cloud deployment
+### ☁️ Deployability — Docker-ready
 
-The project ships with both a **`Dockerfile`** and a **`Procfile`** for true one-click deploys:
+The project is **Docker-ready** and ships a full production stack: `Dockerfile`,
+`docker-compose.yml`, `Procfile`, `.dockerignore`, and a `deploy.sh` helper. The
+`Dockerfile` (`python:3.12-slim`) installs dependencies and bakes in the spaCy models at build
+time, exposes `8501`, and launches Streamlit; `.dockerignore` keeps secrets, the venv, and local
+DBs out of the image.
 
-- **`Dockerfile`** (`python:3.12-slim`) installs dependencies, runs `setup.sh` to bake in the
-  spaCy models at build time, exposes `8501`, and launches Streamlit — deployable to any
-  container host (AWS, Cloud Run, Fly.io, …).
-- **`Procfile`** (`web: streamlit run app.py --server.port $PORT --server.address 0.0.0.0`)
-  targets buildpack platforms like Render and Heroku.
+**Method A — Docker Compose (recommended):**
+
+```bash
+export GEMINI_API_KEY="your-key"          # or put it in a local .env file
+docker-compose up -d --build              # builds the image and starts the app on :8501
+```
+
+`deploy.sh` wraps this for a server (`git pull` → rebuild → reload Nginx):
+
+```bash
+./deploy.sh
+```
+
+**Method B — Nginx reverse proxy** (put the container behind a domain / TLS). Point Nginx at the
+container's exposed port:
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8501;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;      # Streamlit needs WebSocket upgrade
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**Buildpack platforms** (Render, Heroku) use the `Procfile`:
+`web: streamlit run app.py --server.port $PORT --server.address 0.0.0.0`.
+
+> **MCP honesty note:** `mcp_servers/linguistics_server.py` is a fully standards-compliant MCP
+> server (`FastMCP`, `mcp.run()`). The web app **imports its tools directly (in-process)** for
+> lowest latency — a deliberate performance choice, not a limitation. The same server can be run
+> and consumed over stdio by any MCP client: `mcp run mcp_servers/linguistics_server.py`.
 
 ### 3. Configure your Gemini API key
 

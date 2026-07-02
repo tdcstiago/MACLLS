@@ -1,0 +1,10 @@
+services:
+  web:
+    build: .
+    container_name: maclls
+    ports:
+      - "8501:8501"
+    environment:
+      # Provide the key via the host environment or a local .env file — never commit it.
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    restart: unless-stopped
