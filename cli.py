@@ -13,6 +13,8 @@ from pathlib import Path
 
 from agents.orchestrator import LanguageOrchestrator
 from database.db_manager import DatabaseManager
+from mcp_servers.spacy_manager import warmup as warmup_spacy
+from observability import configure_logging, set_correlation_id
 
 PLACEHOLDER_KEY = "PASTE_YOUR_ROTATED_KEY_HERE"
 SECRETS_PATH = Path(".streamlit/secrets.toml")
@@ -85,6 +87,14 @@ def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # Structured logging: quiet by default so the lesson output stays clean; set
+    # LOG_LEVEL=INFO (or DEBUG) to see the full JSON request trace on stdout.
+    configure_logging(os.environ.get("LOG_LEVEL") or "WARNING")
+    set_correlation_id()
+
+    # Preload the L1 model up front so a first sentence parse isn't slow; fail-safe.
+    warmup_spacy(args.l1)
 
     api_key = load_api_key()
     if not api_key:

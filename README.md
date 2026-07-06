@@ -100,17 +100,23 @@ MACLLS/                           # repository root
 │   ├── orchestrator.py           # LanguageOrchestrator: pipeline, retries, cache, schemas
 │   └── prompts.py                # Agent personas, CEFR profiles, focus blocks, lesson skeletons
 ├── mcp_servers/
-│   └── linguistics_server.py     # FastMCP tools: curated false friends + spaCy sentence parse
+│   ├── linguistics_server.py     # FastMCP tools: curated false friends + spaCy sentence parse
+│   └── spacy_manager.py          # Thread-safe Singleton: load spaCy models once, NER excluded
+├── observability/
+│   ├── logger_setup.py           # JSON-to-stdout logging (LOG_LEVEL-driven, idempotent)
+│   └── correlation.py            # Per-request correlation ID (ContextVar + logging.Filter)
 ├── database/
 │   ├── db_manager.py             # SQLite: settings, languages, lesson cache, flashcards
 │   └── srs_engine.py             # Pure SM-2 spaced-repetition math
 ├── scripts/
 │   └── smoke_test.py             # Quick "is the Gemini key working?" check (reads env var)
-├── tests/                        # 65 tests (unittest)
+├── tests/                        # 88 tests (unittest)
 │   ├── test_agents_prompts.py
 │   ├── test_orchestrator.py
 │   ├── test_orchestrator_api.py  # retry/fallback/parallel/schema with a fake client
 │   ├── test_linguistics_server.py
+│   ├── test_spacy_manager.py     # Singleton identity, thread-safe load-once, NER-excluded
+│   ├── test_logging.py           # JSON schema, correlation ID, copy_context thread propagation
 │   ├── test_database.py
 │   └── test_srs.py
 ├── .streamlit/
@@ -304,11 +310,13 @@ the ease factor floors at 1.3; a lapse (Again) resets repetitions and interval.
 python -m unittest discover -s tests
 ```
 
-65 tests cover: prompt integrity, the orchestrator's retry/fallback/parallel/empty-response
+88 tests cover: prompt integrity, the orchestrator's retry/fallback/parallel/empty-response
 logic (via an injected fake Gemini client — no network needed), input classification, the MCP
-false-friend scan and graceful spaCy fallback, the SQLite layer (settings/cache/TTL/languages/
-token accounting), and the SM-2 math + flashcard scheduling. Tests use in-memory SQLite and
-never require an API key or spaCy models.
+false-friend scan and graceful spaCy fallback, the spaCy Singleton (thread-safe load-once, NER
+exclusion, warmup fail-safe), the observability layer (JSON schema, correlation-ID propagation
+through `copy_context`), the SQLite layer (settings/cache/TTL/languages/token accounting), and
+the SM-2 math + flashcard scheduling. Tests use in-memory SQLite and never require an API key or
+spaCy models (model-dependent assertions skip cleanly when a model isn't installed).
 
 ---
 
@@ -338,6 +346,121 @@ never require an API key or spaCy models.
   "try again" warning instead of crashing, the orchestrator refuses to cache the bad response,
   and the first 100 characters of the offending payload are logged via `logger.warning` for
   security auditing.
+
+---
+
+## 📡 Observability & Telemetry
+
+MACLLS emits **structured JSON logs to `stdout`**, so a container runtime (Docker, OCI, or an
+Nginx-fronted host) captures the full request trace with `docker logs` / `oci logging` — no log
+files, no extra agent. The observability layer lives in `observability/` and is wired only at the
+two entry points (`app.py`, `cli.py`); the domain layers (orchestrator, MCP tools) stay decoupled
+and just call the stdlib `logging` module — Clean Architecture is preserved.
+
+### Log schema
+
+Every line is a self-contained JSON object:
+
+```json
+{
+  "timestamp": "2026-07-03T14:22:05.512Z",
+  "level": "INFO",
+  "logger": "agents.orchestrator",
+  "message": "agent.done",
+  "correlation_id": "ff0bd9e9c1d4487aa1b2c3d4e5f60718",
+  "agent": "L1",
+  "duration_ms": 14537,
+  "token_count": 1791
+}
+```
+
+| Field | Always present | Meaning |
+|-------|:---:|---------|
+| `timestamp` | ✓ | UTC ISO-8601, millisecond precision |
+| `level` | ✓ | `INFO` / `WARNING` / `ERROR` / `DEBUG` |
+| `logger` | ✓ | Emitting module (e.g. `agents.orchestrator`, `mcp_servers.linguistics_server`) |
+| `message` | ✓ | Event name (see below) |
+| `correlation_id` | ✓ | Per-request trace ID (`-` when outside a request) |
+| `error` | on exception | Formatted exception + traceback |
+| *extras* | per-event | `agent`, `duration_ms`, `token_count`, `input_mode`, `l1`, `l2`, `cefr`, `parse_ok`, `input` (truncated), … |
+
+**Event vocabulary** (the `message` field): `request.start` → `cache.hit` / `cache.miss` →
+`mcp.discover` / `mcp.analyze_sentence` → `agent.start` / `agent.done` (`L1`, `L2`, `pedagogue`) →
+`llm.retry` / `llm.fallback` → `cache.store` → `request.done`.
+
+### Correlation ID — tracing one request across the multi-agent pipeline
+
+A single request fans out across parallel agents (L1 + L2 in a `ThreadPoolExecutor`), the spaCy
+MCP tools, multiple Gemini calls, and the cache. To stitch those scattered log lines back into
+**one traceable story**, each entry point generates a `correlation_id` (uuid4 hex) and stamps it
+on every log record via a `contextvars.ContextVar` + a `logging.Filter` — no function signature
+carries it, so the layer boundaries stay clean.
+
+The one subtlety: `ContextVar`s do **not** auto-propagate into `ThreadPoolExecutor` worker
+threads, so the L1/L2 specialists would otherwise lose the ID. We fix that by copying the context
+into each worker (`contextvars.copy_context().run(...)`). The payoff — every line of a request,
+including the parallel specialists, shares one ID:
+
+```bash
+$ LOG_LEVEL=INFO python cli.py "livro" | grep correlation_id
+{"message":"request.start","correlation_id":"ff0bd9e9…","input_mode":"word","input":"livro"}
+{"message":"agent.start","correlation_id":"ff0bd9e9…","agent":"L1"}   # worker thread
+{"message":"agent.start","correlation_id":"ff0bd9e9…","agent":"L2"}   # worker thread
+{"message":"agent.done","correlation_id":"ff0bd9e9…","agent":"pedagogue","duration_ms":7511,"token_count":1791}
+{"message":"request.done","correlation_id":"ff0bd9e9…","duration_ms":22152,"parse_ok":true}
+```
+
+### `LOG_LEVEL` — controlling verbosity (Docker / OCI)
+
+Verbosity is driven by the `LOG_LEVEL` environment variable (`DEBUG` / `INFO` / `WARNING` /
+`ERROR`), so you tune it **per environment without a code change** — exactly what you want in a
+container:
+
+```bash
+docker run -e LOG_LEVEL=INFO    maclls   # full request trace (default for the web app)
+docker run -e LOG_LEVEL=DEBUG   maclls   # + verbose diagnostics
+docker run -e LOG_LEVEL=WARNING maclls   # only retries / fallbacks / errors
+```
+
+```yaml
+# docker-compose.yml
+services:
+  maclls:
+    environment:
+      - LOG_LEVEL=INFO
+```
+
+Defaults: the **Streamlit app** logs at `INFO` (server stdout, no UI clutter); the **CLI** defaults
+to `WARNING` so `python cli.py "peixe"` prints a clean lesson — set `LOG_LEVEL=INFO` to see the
+full JSON trace interleaved. Noisy third-party loggers (`httpx`, `google_genai`, `spacy`, …) are
+pinned to `WARNING` so the stream stays readable.
+
+**Security guardrail:** logs never contain the API key, full user input (truncated to 40 chars),
+or lesson bodies — only metadata, timings, and token counts safe to ship to a log aggregator.
+
+---
+
+## ⚡ Performance — spaCy model Singleton
+
+spaCy pipelines are heavy to load, so `mcp_servers/spacy_manager.py` manages them as a
+**process-wide Singleton**: each language's model is loaded **once** and shared *by reference*
+across every request, never reloaded per call.
+
+- **Load once, share by reference** — a language's `nlp` object is built on first use and cached
+  for the life of the container/process; subsequent requests reuse the same in-memory instance.
+- **Thread-safe (double-checked locking)** — the hot path is an unlocked dict read; only a cache
+  miss takes a lock, and re-checks inside it, so the parallel L1/L2 specialists can never
+  double-load the same model.
+- **NER excluded** — models load with `exclude=["ner"]`. We only consume POS (tagger/
+  morphologizer), dependency parse (parser), and lemmas (lemmatizer); dropping the unused NER
+  component lowers RAM and speeds up both load and per-document inference.
+- **Eager warmup** — `app.py` and `cli.py` call `warmup(l1)` at startup to preload the native
+  language, so a demo's first sentence parse isn't slow. Warmup is **fail-safe**: if the model
+  isn't installed it logs a single `spacy.warmup_skipped` warning and the app starts normally
+  (mock / model-less deployments are unaffected).
+
+A cold load emits one structured `spacy.model_loaded` log line (carrying the request's correlation
+ID) — you can confirm in the logs that a model loads exactly once per process and never again.
 
 ---
 

@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import json
 import logging
@@ -30,6 +31,14 @@ from mcp_servers.linguistics_server import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate(text: str, limit: int = 40) -> str:
+    """Collapse whitespace and cap length so user text is safe/clean in logs
+    (never log full inputs, lessons, or anything sensitive)."""
+    cleaned = " ".join((text or "").split())
+    return cleaned if len(cleaned) <= limit else cleaned[:limit] + "…"
+
 
 # HTTP status codes worth retrying with backoff (transient server / rate-limit).
 RETRYABLE_CODES = {429, 500, 502, 503, 504}
@@ -157,14 +166,22 @@ class LanguageOrchestrator:
                 return self._extract_text(response, primary_model)
             except APIError as e:
                 last_error = e
+                code = getattr(e, "code", None)
                 # Only back off + retry on transient codes; fail fast otherwise.
-                if getattr(e, "code", None) in RETRYABLE_CODES and attempt < retries - 1:
-                    time.sleep(delay * (2 ** attempt))  # exponential backoff
+                if code in RETRYABLE_CODES and attempt < retries - 1:
+                    backoff = delay * (2 ** attempt)  # exponential backoff
+                    logger.warning(
+                        "llm.retry",
+                        extra={"model": primary_model, "attempt": attempt + 1,
+                               "http_code": code, "backoff_s": backoff},
+                    )
+                    time.sleep(backoff)
                     continue
-                if getattr(e, "code", None) not in RETRYABLE_CODES:
+                if code not in RETRYABLE_CODES:
                     raise
 
         # Primary model exhausted its retries on transient errors → try fallback.
+        logger.warning("llm.fallback", extra={"from_model": primary_model, "to_model": fallback_model})
         try:
             response = self.client.models.generate_content(
                 model=fallback_model,
@@ -175,12 +192,28 @@ class LanguageOrchestrator:
         except APIError as fallback_error:
             raise fallback_error from last_error
 
+    def _run_agent(self, agent_name: str, prompt: str) -> str:
+        """Run one specialist generation, timed and logged with structured context."""
+        start = time.perf_counter()
+        logger.info("agent.start", extra={"agent": agent_name})
+        result = self._generate_content_with_retry(prompt)
+        logger.info(
+            "agent.done",
+            extra={"agent": agent_name, "duration_ms": round((time.perf_counter() - start) * 1000)},
+        )
+        return result
+
     def _run_specialists(self, l1_prompt: str, l2_prompt: str) -> tuple[str, str]:
-        """Run the independent L1 and L2 specialists in parallel (fail-fast)."""
+        """Run the independent L1 and L2 specialists in parallel (fail-fast).
+
+        ContextVars (e.g. the correlation id) do NOT auto-propagate into worker
+        threads, so each task runs inside a FRESH copy of the current context —
+        a separate copy per thread, because one Context cannot be entered twice
+        concurrently."""
         pool = ThreadPoolExecutor(max_workers=2)
         try:
-            l1_future = pool.submit(self._generate_content_with_retry, l1_prompt)
-            l2_future = pool.submit(self._generate_content_with_retry, l2_prompt)
+            l1_future = pool.submit(contextvars.copy_context().run, self._run_agent, "L1", l1_prompt)
+            l2_future = pool.submit(contextvars.copy_context().run, self._run_agent, "L2", l2_prompt)
             done, _ = wait({l1_future, l2_future}, return_when=FIRST_EXCEPTION)
             for future in done:
                 if future.exception() is not None:
@@ -288,6 +321,10 @@ class LanguageOrchestrator:
         profile = cefr_profile(proficiency_level)
         level = self._normalize_level(proficiency_level)
 
+        request_start = time.perf_counter()
+        log_ctx = {"input_mode": mode, "l1": l1_lang, "l2": l2_lang, "cefr": level}
+        logger.info("request.start", extra={**log_ctx, "input": _truncate(text)})
+
         # Cache is consulted only on the real LLM path (mock output is never cached).
         # A hit short-circuits BOTH the local MCP step and the LLM pipeline.
         cache_key = None
@@ -295,18 +332,23 @@ class LanguageOrchestrator:
             cache_key = self.db.build_cache_key(l1_lang, l2_lang, level, mode, text, PROMPT_VERSION)
             cached = self.db.get_cached(cache_key, self.CACHE_TTL_DAYS)
             if cached is not None:
+                logger.info("cache.hit", extra={**log_ctx,
+                            "duration_ms": round((time.perf_counter() - request_start) * 1000)})
                 return cached
+            logger.info("cache.miss", extra=log_ctx)
 
         if mode == "sentence":
             structure = analyze_sentence_structure(text, l1_lang, l2_lang)
             if not self.api_key or not self.client:
-                return self._sentence_mock(text, structure, labels, level)
-            result = self._run_sentence_pipeline(text, l1_lang, l2_lang, structure, labels, profile, level)
+                result = self._sentence_mock(text, structure, labels, level)
+            else:
+                result = self._run_sentence_pipeline(text, l1_lang, l2_lang, structure, labels, profile, level)
         else:
             scenarios = discover_contrastive_scenarios(text, l2_lang)
             if not self.api_key or not self.client:
-                return self._word_mock(text, scenarios, labels, level)
-            result = self._run_word_pipeline(text, l1_lang, l2_lang, scenarios, labels, profile, level)
+                result = self._word_mock(text, scenarios, labels, level)
+            else:
+                result = self._run_word_pipeline(text, l1_lang, l2_lang, scenarios, labels, profile, level)
 
         # Cache only well-formed responses (never persist a parse-failure fallback).
         if cache_key is not None and result.get("parse_ok", True):
@@ -314,6 +356,10 @@ class LanguageOrchestrator:
                 cache_key, mode, level, json.dumps(result),
                 token_count=result.get("token_count", 0),
             )
+            logger.info("cache.store", extra={**log_ctx, "token_count": result.get("token_count", 0)})
+
+        logger.info("request.done", extra={**log_ctx, "parse_ok": result.get("parse_ok", True),
+                    "duration_ms": round((time.perf_counter() - request_start) * 1000)})
         return result
 
     # --- word-mode pipeline --------------------------------------------------
@@ -347,10 +393,12 @@ class LanguageOrchestrator:
                     f"<<<{word}>>>), and clarify what the false friend '{danger_txt}' actually means in {l2_lang}."
                 )
                 lesson_structure = (
-                    f'Open the lesson with two contrastive sections using these exact {l1_lang} headers:\n'
-                    f'1. "{labels["dangerous"]}" — the dangerous false friend and why it traps {l1_lang} '
-                    f'speakers.\n2. "{labels["safe"]}" — the correct/intended {l2_lang} word and its idiomatic '
-                    f'usage.\nThen continue with the full lesson body:\n{sections}'
+                    f'Open the lesson with two contrastive sections, each titled with a level-3 header '
+                    f'(`### {labels["dangerous"]}` then `### {labels["safe"]}`) on its own line, with a '
+                    f'blank line between sections:\n'
+                    f'- "{labels["dangerous"]}": the dangerous false friend and why it traps {l1_lang} speakers.\n'
+                    f'- "{labels["safe"]}": the correct/intended {l2_lang} word and its idiomatic usage.\n'
+                    f'Then continue with the full lesson body:\n{sections}'
                 )
                 options_instruction = (
                     f'For "similar_options", give exactly {NUM_SIMILAR_OPTIONS} {l2_lang} words that are '
@@ -422,9 +470,11 @@ Return a JSON object matching the required schema, where:
                 response_mime_type="application/json", response_schema=PedagogueOutput
             )
             token_count = self._count_tokens(final_prompt)
-            parsed = self._parse_pedagogue_payload(
-                self._generate_content_with_retry(final_prompt, config=config)
-            )
+            ped_start = time.perf_counter()
+            payload = self._generate_content_with_retry(final_prompt, config=config)
+            logger.info("agent.done", extra={"agent": "pedagogue", "token_count": token_count,
+                        "duration_ms": round((time.perf_counter() - ped_start) * 1000)})
+            parsed = self._parse_pedagogue_payload(payload)
 
             # Cards prefer authoritative curated data; else fall back to LLM targets.
             if has_local:
@@ -523,9 +573,11 @@ Return a JSON object matching the required schema, where:
                 response_mime_type="application/json", response_schema=SentenceLessonOutput
             )
             token_count = self._count_tokens(final_prompt)
-            parsed = self._parse_sentence_payload(
-                self._generate_content_with_retry(final_prompt, config=config)
-            )
+            ped_start = time.perf_counter()
+            payload = self._generate_content_with_retry(final_prompt, config=config)
+            logger.info("agent.done", extra={"agent": "pedagogue", "token_count": token_count,
+                        "duration_ms": round((time.perf_counter() - ped_start) * 1000)})
+            parsed = self._parse_sentence_payload(payload)
 
             return self._build_result(
                 "sentence", parsed["lesson"], labels, level, structure["warning"],

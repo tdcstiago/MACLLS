@@ -191,23 +191,33 @@ SYNTACTIC_FOCUS_L2 = (
 # consistently substantial (never a one-liner). Format with l1_lang / l2_lang /
 # max_examples. All prose is written in the student's L1; L2 is used only for the
 # example words and phrases.
+# FORMATTING: each section title is a level-3 header (`### Title`) on its OWN line, its content
+# on the following line(s), and a BLANK LINE between sections. Never `#`/`##` (too large) and
+# never a single run-on line.
+_LESSON_FORMAT_RULES = (
+    "Formatting rules (follow EXACTLY): write each section title as a level-3 Markdown header on "
+    "its own line (`### Title`); put the section's content on the following line(s); leave ONE "
+    "BLANK LINE between sections. Do NOT use `#` or `##` headers, and never output the lesson as "
+    "a single run-on line.\n"
+)
+
 WORD_LESSON_SECTIONS = (
     "Produce the Markdown lesson (in \"lesson_markdown\") in {l1_lang} using ALL of these "
-    "sections, each with its own Markdown header — never a single sentence:\n"
-    "1. **Significado & Tradução** — the core meaning and the main {l2_lang} translation(s).\n"
-    "2. **Uso em Contexto** — at least {max_examples} example sentence(s) in {l2_lang}, each "
-    "followed by a short {l1_lang} gloss.\n"
-    "3. **Colocações & Expressões relacionadas** — common {l2_lang} collocations or set phrases.\n"
-    "4. **Nuances & Registro** — connotation, register, and subtle {l1_lang}->{l2_lang} differences.\n"
-    "5. **Dicas / Erros comuns** — one practical tip or common learner mistake."
+    "sections — never a single sentence.\n" + _LESSON_FORMAT_RULES +
+    "### Significado & Tradução\nThe core meaning and the main {l2_lang} translation(s).\n\n"
+    "### Uso em Contexto\nProvide at least {max_examples} example sentence(s) in {l2_lang}, each "
+    "followed by a short {l1_lang} gloss.\n\n"
+    "### Colocações & Expressões relacionadas\nCommon {l2_lang} collocations or set phrases.\n\n"
+    "### Nuances & Registro\nConnotation, register, and subtle {l1_lang}->{l2_lang} differences.\n\n"
+    "### Dicas / Erros comuns\nOne practical tip or common learner mistake."
 )
 
 SENTENCE_LESSON_SECTIONS = (
     "Produce the Markdown lesson (in \"lesson_markdown\") in {l1_lang} using ALL of these "
-    "sections, each with its own Markdown header:\n"
-    "1. **Tradução Idiomática** — the natural {l2_lang} rendering, with at least {max_examples} "
-    "example variation(s).\n"
-    "2. **Contrastes Estruturais** — the key {l1_lang}->{l2_lang} transfer/word-order contrasts.\n"
-    "3. **Erros Comuns** — embedded false friends or typical mistakes to avoid.\n"
-    "4. **Dica** — one practical tip for producing this structure naturally."
+    "sections.\n" + _LESSON_FORMAT_RULES +
+    "### Tradução Idiomática\nThe natural {l2_lang} rendering, with at least {max_examples} "
+    "example variation(s).\n\n"
+    "### Contrastes Estruturais\nThe key {l1_lang}->{l2_lang} transfer/word-order contrasts.\n\n"
+    "### Erros Comuns\nEmbedded false friends or typical mistakes to avoid.\n\n"
+    "### Dica\nOne practical tip for producing this structure naturally."
 )

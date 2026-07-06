@@ -3,12 +3,12 @@ from mcp_servers.linguistics_server import (
     discover_contrastive_scenarios,
     analyze_sentence_structure,
     _scan_false_friends,
-    _load_model,
 )
+from mcp_servers.spacy_manager import get_model
 
 # Whether a real spaCy model is available in this environment. When absent (CI /
 # fresh checkout), the sentence tool must degrade gracefully rather than fail.
-_nlp, _ = _load_model("Portuguese")
+_nlp, _ = get_model("Portuguese")
 MODEL_AVAILABLE = _nlp is not None
 
 

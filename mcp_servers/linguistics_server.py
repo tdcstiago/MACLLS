@@ -1,29 +1,16 @@
-import functools
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
-# spaCy is optional: the module must import (and all word-mode behaviour must work)
-# even when spaCy or a language model is absent. Sentence analysis then degrades to
-# an LLM-only path with a warning.
-try:
-    import spacy
-except ImportError:  # pragma: no cover - environment-dependent
-    spacy = None
+# Model loading lives in the spaCy Singleton manager (loaded once per process,
+# NER excluded, thread-safe). SPACY_MODELS is re-exported here for backward
+# compatibility — this module remains the documented home of the mapping.
+from mcp_servers.spacy_manager import SPACY_MODELS, get_model
+
+logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
 mcp = FastMCP('LinguisticsServer')
-
-# Display-name -> spaCy model. Models are NOT pip dependencies; install on demand:
-#   python -m spacy download pt_core_news_sm en_core_web_sm ...
-SPACY_MODELS = {
-    "English": "en_core_web_sm",
-    "Portuguese": "pt_core_news_sm",
-    "Spanish": "es_core_news_sm",
-    "French": "fr_core_news_sm",
-    "German": "de_core_news_sm",
-    "Italian": "it_core_news_sm",
-    "Romanian": "ro_core_news_sm",
-}
 
 # --- Curated high-risk false friends -----------------------------------------
 # Maps an L1 word (lowercased) -> target language -> the twin scenario pair:
@@ -133,34 +120,9 @@ def discover_contrastive_scenarios(word_l1: str, l2_lang: str = "English") -> di
             "secondary suggestions will be generated dynamically by the LLM."
         )
 
+    logger.info("mcp.discover", extra={"tool": "discover_contrastive_scenarios",
+                "l2": l2_lang, "has_local_data": result["has_local_data"]})
     return result
-
-
-@functools.lru_cache(maxsize=2)
-def _load_model(lang: str):
-    """Lazily load the spaCy pipeline for a display-language.
-
-    Decorated with an LRU cache (maxsize=2) so at most two heavy spaCy models are
-    resident in RAM at once — this bounds memory and prevents OOM crashes.
-
-    Returns (nlp, None) on success, or (None, warning) when spaCy or the model is
-    unavailable — callers must degrade gracefully rather than fail."""
-    if spacy is None:
-        return None, "spaCy is not installed; falling back to LLM-only sentence analysis."
-
-    model_name = SPACY_MODELS.get(lang)
-    if not model_name:
-        return None, f"No spaCy model configured for '{lang}'; falling back to LLM-only analysis."
-
-    try:
-        nlp = spacy.load(model_name)
-    except Exception:  # model not downloaded / load failure
-        return None, (
-            f"spaCy model '{model_name}' is not installed "
-            f"(run: python -m spacy download {model_name}); falling back to LLM-only analysis."
-        )
-
-    return nlp, None
 
 
 def _scan_false_friends(tokens: list, l2_lang: str) -> list:
@@ -232,7 +194,7 @@ def analyze_sentence_structure(
         result["warning"] = "Input sentence cannot be empty."
         return result
 
-    nlp, warn = _load_model(l1_lang)
+    nlp, warn = get_model(l1_lang)
 
     if nlp is None:
         # Graceful degradation: whitespace tokens + curated false-friend scan only.
@@ -243,6 +205,9 @@ def analyze_sentence_structure(
         ]
         result["detected_false_friends"] = _scan_false_friends(raw_tokens, l2_lang)
         result["warning"] = warn
+        logger.info("mcp.analyze_sentence", extra={"tool": "analyze_sentence_structure",
+                    "spacy_loaded": False, "tokens": len(result["tokens"]),
+                    "false_friends": len(result["detected_false_friends"])})
         return result
 
     doc = nlp(text)
@@ -262,6 +227,9 @@ def analyze_sentence_structure(
     ]
     result["morphology_summary"] = _summarize_morphology(doc)
     result["detected_false_friends"] = _scan_false_friends([t.text for t in doc], l2_lang)
+    logger.info("mcp.analyze_sentence", extra={"tool": "analyze_sentence_structure",
+                "spacy_loaded": True, "tokens": len(result["tokens"]),
+                "false_friends": len(result["detected_false_friends"])})
     return result
 
 

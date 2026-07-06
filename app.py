@@ -3,6 +3,11 @@ import random
 import streamlit as st
 from agents.orchestrator import LanguageOrchestrator, PROMPT_VERSION
 from database.db_manager import DatabaseManager
+from mcp_servers.spacy_manager import warmup as warmup_spacy
+from observability import configure_logging, set_correlation_id
+
+# Structured JSON logging to stdout (Docker/OCI capture it). Idempotent across reruns.
+configure_logging()
 
 
 @st.cache_resource
@@ -11,7 +16,17 @@ def get_db() -> DatabaseManager:
     return DatabaseManager()
 
 
+@st.cache_resource
+def _warm_spacy(lang: str) -> bool:
+    """Preload the L1 spaCy model once per server so the first sentence analysis
+    isn't slow. Cached per language; warmup() is fail-safe and never raises."""
+    return warmup_spacy(lang)
+
+
 db = get_db()
+
+# Warm the persisted native language so a demo's first sentence parse is instant.
+_warm_spacy(db.get_setting("l1_lang", "Portuguese"))
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -135,6 +150,8 @@ with tab_analysis:
             else:
                 with st.spinner("Our agent-led team is analyzing your input..."):
                     try:
+                        # One correlation id per analysis request, traced across all agents.
+                        set_correlation_id()
                         orchestrator = LanguageOrchestrator(api_key=final_key, db=db)
                         result = orchestrator.process_lesson(
                             input_l1=input_l1,
