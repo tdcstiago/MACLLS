@@ -1,3 +1,4 @@
+import os
 import random
 
 import streamlit as st
@@ -78,16 +79,24 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # Tenta buscar do secrets.toml automaticamente, se não achar fica em branco
+    # Resolve the key from the environment first (Docker/OCI inject GEMINI_API_KEY
+    # at runtime), then fall back to .streamlit/secrets.toml for local dev. The
+    # template placeholder is treated as "missing" so the warning still shows.
     PLACEHOLDER_KEY = "PASTE_YOUR_ROTATED_KEY_HERE"
     default_key = ""
-    try:
-        secret_key = st.secrets.get("GEMINI_API_KEY", "")
-        # Ignora o placeholder do template para preservar a mensagem "API Key is missing"
-        if secret_key and secret_key != PLACEHOLDER_KEY:
-            default_key = secret_key
-    except Exception:
-        pass
+
+    env_key = os.environ.get("GEMINI_API_KEY", "")
+    if env_key and env_key != PLACEHOLDER_KEY:
+        default_key = env_key
+
+    if not default_key:
+        # st.secrets raises if there is no secrets.toml (the container case), so guard it.
+        try:
+            secret_key = st.secrets.get("GEMINI_API_KEY", "")
+            if secret_key and secret_key != PLACEHOLDER_KEY:
+                default_key = secret_key
+        except Exception:
+            pass
 
     api_key_input = st.text_input(
         "Google Gemini API Key",
